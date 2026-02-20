@@ -22,6 +22,8 @@ app.on("ready", () => {
         frame: false,
         focusable: false, // Windows, MacOS
         transparent: true,
+        movable: false,
+        resizable: false,
         // This apparently exists but my LSP complains
         // visibleOnAllWorkspaces: true, // MacOS, Linux
         alwaysOnTop: true,
