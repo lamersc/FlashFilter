@@ -27,6 +27,5 @@ app.on("ready", () => {
         alwaysOnTop: true,
     });
     browserWindow.setIgnoreMouseEvents(true);
-
     browserWindow.loadFile('index.html');
 });
