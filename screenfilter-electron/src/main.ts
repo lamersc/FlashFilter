@@ -26,6 +26,7 @@ app.on("ready", () => {
         // visibleOnAllWorkspaces: true, // MacOS, Linux
         alwaysOnTop: true,
     });
+    //REGION: set cer
     browserWindow.setIgnoreMouseEvents(true);
     browserWindow.setSimpleFullScreen(true);
     browserWindow.loadFile('index.html');
