@@ -6,7 +6,7 @@ import numpy as np
 previous_frame = None
 
 def process_frame(frame):
-    """Limit maximum brightness change between consecutive frames."""
+    """Adaptive brightness clamping based on motion detection."""
     global previous_frame
 
     # On first call, store the frame and return it
@@ -14,18 +14,31 @@ def process_frame(frame):
         previous_frame = frame.copy()
         return frame
 
-    # Maximum allowed brightness change per channel (0-255 scale)
     max_delta = 30
+    motion_threshold = 30  # Grayscale delta threshold for detecting motion
 
-    # Convert to int16 to handle arithmetic without overflow
+    # Convert frames to grayscale for motion detection
+    current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    previous_gray = cv2.cvtColor(previous_frame, cv2.COLOR_BGR2GRAY)
+
+    # Calculate the delta (difference) between frames
+    delta = cv2.absdiff(current_gray, previous_gray)
+
+    # Create motion mask: 0 where no motion (apply clamp), 1 where motion (keep current)
+    motion_mask = (delta > motion_threshold).astype(np.float32)
+    motion_mask = motion_mask[:, :, np.newaxis]  # Shape (H, W, 1) for broadcasting
+
+    # Convert frames to int16 for arithmetic
     current = frame.astype(np.int16)
     previous = previous_frame.astype(np.int16)
 
-    # Clamp current frame to be within max_delta of previous frame
-    # new_value = clamp(current, previous - max_delta, previous + max_delta)
-    result = np.maximum(current, previous - max_delta)
-    result = np.minimum(result, previous + max_delta)
-    result = np.uint8(result)
+    # Calculate clamped version: limit change to max_delta
+    clamped = np.maximum(current, previous - max_delta)
+    clamped = np.minimum(clamped, previous + max_delta)
+
+    # Blend: apply clamp where no motion, keep current where motion detected
+    result = clamped * (1 - motion_mask) + current * motion_mask
+    result = np.uint8(np.clip(result, 0, 255))
 
     # Store the processed frame for next iteration
     previous_frame = result.copy()
