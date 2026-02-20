@@ -4,7 +4,7 @@ import { app, ipcMain, desktopCapturer, session,  BrowserWindow, screen } from '
 // and MacOS.
 app.on("ready", () => {
     // Set up the media handler BEFORE creating the window
-    const { width, height } = screen.getPrimaryDisplay().bounds;
+    const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
     session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
         desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
         // Grant access to the first screen found.
@@ -31,7 +31,7 @@ app.on("ready", () => {
     });
     //REGION: set cer
     browserWindow.setIgnoreMouseEvents(true);
-    browserWindow.setBounds({ x: 0, y: 0, width, height });
+    browserWindow.setBounds({ x: x, y: y, width, height });
     browserWindow.setAlwaysOnTop(true, 'screen-saver');
     //browserWindow.setSimpleFullScreen(true);
     browserWindow.loadFile('index.html');
