@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import  {screen } from "electron";
-import { censor, CensorContext } from './censor';
+import { FlashingDissolver } from './flashing-dissolver';
 
 
 // renderer.js
@@ -9,20 +9,12 @@ const { ipcRenderer } = require('electron');
 let screenWidth = window.innerWidth;
 let screenHeight = window.innerHeight;
 
-let lastPngCallTime = 0;
-let intervals: number[] = [];
-// Settings and initial state for the censoring algorithm.
-let censorCtx: CensorContext = {
-  history: [],
-  ring_start: 0,
-  ring_size: 10
-};
 
 // Get accurate dimensions from main process (handles Retina/HiDPI correctly)
 // @ts-ignore
 ipcRenderer.once('screen-bounds', (_event, bounds) => {
-  screenWidth = bounds.width;
-  screenHeight = bounds.height;
+  screenWidth = bounds.width / bounds.width * 720;
+  screenHeight = bounds.height / bounds.width * 720;
   startCapture();
 });
 
@@ -48,15 +40,20 @@ function startCapture() {
     let lastPngCallTime = 0;
     let intervals: number[] = [];
 
+    const video = document.querySelector('video')!;
+    video.srcObject = canvas.captureStream(30); // match your target frame rate
+    video.play();
+
     setInterval(() => {
-      // @ts-ignore
-      capture.grabFrame().then((bitmap) => {
+      //@ts-ignore
+      capture.grabFrame().then((bitmap: ImageBitmap) => {
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
         // @ts-ignore
         ctx.drawImage(bitmap, 0, 0);
-        censor(censorCtx, bitmap, canvas);
-        document.getElementsByTagName("img")[0].src = canvas.toDataURL('image/png');
+
+        //censor(censorCtx, bitmap, canvas);
+        bitmap.close();
       })
     }, 33.3);
 
