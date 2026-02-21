@@ -4,7 +4,7 @@ import { app, ipcMain, desktopCapturer, session,  BrowserWindow, screen } from '
 // and MacOS.
 app.on("ready", () => {
     // Set up the media handler BEFORE creating the window
-    const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
+    const { width, height } = screen.getPrimaryDisplay().size;
     session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
         desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
         // Grant access to the first screen found.
@@ -29,6 +29,7 @@ app.on("ready", () => {
         alwaysOnTop: true,
         enableLargerThanScreen: true,
         hasShadow: false,
+
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
@@ -38,10 +39,14 @@ app.on("ready", () => {
     browserWindow.setIgnoreMouseEvents(true);
     browserWindow.setAlwaysOnTop(true, 'screen-saver');
     browserWindow.setContentProtection(true)
+    browserWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     browserWindow.loadFile('index.html');
     browserWindow.webContents.openDevTools({ mode: 'detach' });
     browserWindow.once('ready-to-show', () => {
-        browserWindow.setBounds({ x: x, y: y, width: width, height: height });
+        setInterval(() => {
+            browserWindow.setBounds({ x: 0, y: 0, width: width, height: height });
+        }, 1000)
+        //browserWindow.setBounds({ x: 0, y: 0, width: width, height: height });
     });
     // Pass screen dimensions to renderer so it doesn't need to import 'screen'
     browserWindow.webContents.once('dom-ready', () => {
