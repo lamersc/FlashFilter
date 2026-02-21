@@ -1,0 +1,15 @@
+define historical_delta_buffer as flash_values
+define prev_image_buffer as hsl
+
+before first iteration, set prev buffer to next frame
+loop {
+    delta = euclid_dist(prev_frame, next_frame)
+    historical_delta_buffer = historical_delta_buffer + 0.8(delta - historical_delta_buffer)
+
+    for each hist_flash_value in historical_delta_buffer {
+        if hist_flash_value > some threshold {
+            # some shader code to draw to canvas
+        }
+    }
+}
+
