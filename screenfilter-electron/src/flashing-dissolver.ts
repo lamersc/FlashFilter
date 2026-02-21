@@ -1,4 +1,4 @@
-// Full-screen quad vertex shader (shared by both passes)
+// Full-screen quad vertex shader (shared by all passes)
 const VERT_SRC = `#version 300 es
 in vec2 a_position;
 out vec2 v_uv;
@@ -7,10 +7,10 @@ void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
 
-// Pass 1: EMA update
+// Pass 1: Delta EMA
 // Computes euclidean distance between prev and current frame,
 // then blends into the historical delta buffer.
-const EMA_FRAG_SRC = `#version 300 es
+const DELTA_EMA_FRAG = `#version 300 es
 precision highp float;
 
 in vec2 v_uv;
@@ -19,8 +19,8 @@ out vec4 fragColor;
 uniform sampler2D u_prevFrame;
 uniform sampler2D u_currentFrame;
 uniform sampler2D u_history;
-uniform float u_alpha;       // EMA blending factor (0.8)
-uniform float u_firstFrame;  // 1.0 on first frame (seeds history with delta)
+uniform float u_alpha;
+uniform float u_firstFrame;
 
 void main() {
     vec3 prev = texture(u_prevFrame, v_uv).rgb;
@@ -30,31 +30,53 @@ void main() {
     float delta = distance(prev, curr);
 
     // EMA: hist = hist + alpha * (delta - hist)
-    // On first frame, just use delta directly (no history yet).
     float newHist = mix(hist + u_alpha * (delta - hist), delta, u_firstFrame);
 
     fragColor = vec4(newHist, newHist, newHist, 1.0);
 }`;
 
-// Pass 2: Threshold + output
-// Reads the historical delta buffer and outputs either a dimmed
-// overlay or a fully transparent pixel.
-const THRESHOLD_FRAG_SRC = `#version 300 es
+// Pass 2: Color EMA
+// Maintains a running average of the raw frame colors.
+const COLOR_EMA_FRAG = `#version 300 es
 precision highp float;
 
 in vec2 v_uv;
 out vec4 fragColor;
 
-uniform sampler2D u_history;
-uniform float u_threshold;
-uniform float u_dimAmount;   // how dark the overlay is (0..1), e.g. 0.6
+uniform sampler2D u_currentFrame;
+uniform sampler2D u_colorAvg;
+uniform float u_colorAlpha;
+uniform float u_firstFrame;
 
 void main() {
-    float flashValue = texture(u_history, v_uv).r;
+    vec3 curr = texture(u_currentFrame, v_uv).rgb;
+    vec3 avg = texture(u_colorAvg, v_uv).rgb;
+
+    // EMA: avg = avg + alpha * (curr - avg)
+    vec3 newAvg = mix(avg + u_colorAlpha * (curr - avg), curr, u_firstFrame);
+
+    fragColor = vec4(newAvg, 1.0);
+}`;
+
+// Pass 3: Output
+// If flash detected, draw the averaged color; otherwise transparent.
+const OUTPUT_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform sampler2D u_deltaHistory;
+uniform sampler2D u_colorAvg;
+uniform float u_threshold;
+
+void main() {
+    float flashValue = texture(u_deltaHistory, v_uv).r;
 
     if (flashValue > u_threshold) {
-        // Draw a dark semi-transparent overlay to dim this pixel
-        fragColor = vec4(0.0, 0.0, 0.0, u_dimAmount);
+        // Replace flashing pixel with the averaged color
+        vec3 avg = texture(u_colorAvg, v_uv).rgb;
+        fragColor = vec4(avg, 1.0);
     } else {
         // Fully transparent — real screen shows through
         fragColor = vec4(0.0, 0.0, 0.0, 0.0);
@@ -112,8 +134,9 @@ export class FlashingDissolver {
     private height: number;
 
     // Programs
-    private emaProgram: WebGLProgram;
-    private thresholdProgram: WebGLProgram;
+    private deltaEmaProgram: WebGLProgram;
+    private colorEmaProgram: WebGLProgram;
+    private outputProgram: WebGLProgram;
 
     // Full-screen quad VAO
     private quadVAO: WebGLVertexArrayObject;
@@ -122,14 +145,21 @@ export class FlashingDissolver {
     private prevFrameTex: WebGLTexture;
     private currentFrameTex: WebGLTexture;
 
-    // History ping-pong textures + FBOs
-    private historyTexA: WebGLTexture;
-    private historyTexB: WebGLTexture;
-    private historyFboA: WebGLFramebuffer;
-    private historyFboB: WebGLFramebuffer;
-    private readFromA: boolean = true; // which history tex to read from
+    // Delta history ping-pong
+    private deltaTexA: WebGLTexture;
+    private deltaTexB: WebGLTexture;
+    private deltaFboA: WebGLFramebuffer;
+    private deltaFboB: WebGLFramebuffer;
+    private deltaReadA: boolean = true;
 
-    // Temp canvas for extracting ImageBitmap → texImage2D
+    // Color average ping-pong
+    private colorAvgTexA: WebGLTexture;
+    private colorAvgTexB: WebGLTexture;
+    private colorAvgFboA: WebGLFramebuffer;
+    private colorAvgFboB: WebGLFramebuffer;
+    private colorReadA: boolean = true;
+
+    // Temp canvas for bitmap → texture upload
     private tmpCanvas: OffscreenCanvas;
     private tmpCtx: OffscreenCanvasRenderingContext2D;
 
@@ -137,9 +167,9 @@ export class FlashingDissolver {
     private hasPrevFrame: boolean = false;
 
     // Tuning parameters
-    private alpha: number = 0.8;
-    private threshold: number = 0.08; // in [0,1] range (colors are normalized)
-    private dimAmount: number = 0.6;
+    private deltaAlpha: number = 0.8;   // EMA rate for flash detection
+    private colorAlpha: number = 0.15;  // EMA rate for color averaging (slower = smoother)
+    private threshold: number = 0.08;   // flash detection threshold [0,1]
 
     constructor(canvas: HTMLCanvasElement, captureWidth: number, captureHeight: number) {
         this.width = captureWidth;
@@ -156,15 +186,15 @@ export class FlashingDissolver {
         if (!gl) throw new Error('WebGL2 not supported');
         this.gl = gl;
 
-        // Enable blending for transparent output
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
         // Compile programs
-        this.emaProgram = createProgram(gl, VERT_SRC, EMA_FRAG_SRC);
-        this.thresholdProgram = createProgram(gl, VERT_SRC, THRESHOLD_FRAG_SRC);
+        this.deltaEmaProgram = createProgram(gl, VERT_SRC, DELTA_EMA_FRAG);
+        this.colorEmaProgram = createProgram(gl, VERT_SRC, COLOR_EMA_FRAG);
+        this.outputProgram = createProgram(gl, VERT_SRC, OUTPUT_FRAG);
 
-        // Create full-screen quad (-1..1)
+        // Full-screen quad
         this.quadVAO = gl.createVertexArray()!;
         gl.bindVertexArray(this.quadVAO);
         const quadBuf = gl.createBuffer()!;
@@ -173,50 +203,53 @@ export class FlashingDissolver {
             -1, -1,  1, -1,  -1, 1,
             -1,  1,  1, -1,   1, 1,
         ]), gl.STATIC_DRAW);
-        // Bind a_position for both programs
-        const emaPos = gl.getAttribLocation(this.emaProgram, 'a_position');
-        const thrPos = gl.getAttribLocation(this.thresholdProgram, 'a_position');
-        gl.enableVertexAttribArray(emaPos);
-        gl.vertexAttribPointer(emaPos, 2, gl.FLOAT, false, 0, 0);
-        if (thrPos !== emaPos) {
-            gl.enableVertexAttribArray(thrPos);
-            gl.vertexAttribPointer(thrPos, 2, gl.FLOAT, false, 0, 0);
-        }
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
         gl.bindVertexArray(null);
 
-        // Create textures
+        // Frame textures
         this.prevFrameTex = createTexture(gl, captureWidth, captureHeight);
         this.currentFrameTex = createTexture(gl, captureWidth, captureHeight);
-        this.historyTexA = createTexture(gl, captureWidth, captureHeight);
-        this.historyTexB = createTexture(gl, captureWidth, captureHeight);
 
-        // Create FBOs for history ping-pong
-        this.historyFboA = createFBO(gl, this.historyTexA);
-        this.historyFboB = createFBO(gl, this.historyTexB);
+        // Delta history ping-pong
+        this.deltaTexA = createTexture(gl, captureWidth, captureHeight);
+        this.deltaTexB = createTexture(gl, captureWidth, captureHeight);
+        this.deltaFboA = createFBO(gl, this.deltaTexA);
+        this.deltaFboB = createFBO(gl, this.deltaTexB);
+
+        // Color average ping-pong
+        this.colorAvgTexA = createTexture(gl, captureWidth, captureHeight);
+        this.colorAvgTexB = createTexture(gl, captureWidth, captureHeight);
+        this.colorAvgFboA = createFBO(gl, this.colorAvgTexA);
+        this.colorAvgFboB = createFBO(gl, this.colorAvgTexB);
+
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-        // Temp canvas for bitmap → texture conversion
+        // Temp canvas for bitmap → texture
         this.tmpCanvas = new OffscreenCanvas(captureWidth, captureHeight);
         this.tmpCtx = this.tmpCanvas.getContext('2d', { willReadFrequently: false })! as OffscreenCanvasRenderingContext2D;
     }
 
     private uploadBitmapToTexture(bitmap: ImageBitmap, tex: WebGLTexture) {
         const gl = this.gl;
-        // Draw bitmap to temp canvas, then upload
         this.tmpCtx.drawImage(bitmap, 0, 0, this.width, this.height);
         gl.bindTexture(gl.TEXTURE_2D, tex);
-        // Flip Y so top-left canvas origin maps to WebGL's bottom-left origin
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, this.tmpCanvas);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     }
 
+    private drawQuad() {
+        const gl = this.gl;
+        gl.bindVertexArray(this.quadVAO);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
     feedFrame(frame: ImageBitmap) {
         const gl = this.gl;
 
-        // Swap: current becomes prev, upload new frame as current
+        // Swap prev/current, upload new frame
         if (this.hasPrevFrame) {
-            // Swap texture references so prev = old current
             const tmp = this.prevFrameTex;
             this.prevFrameTex = this.currentFrameTex;
             this.currentFrameTex = tmp;
@@ -225,71 +258,99 @@ export class FlashingDissolver {
         this.uploadBitmapToTexture(frame, this.currentFrameTex);
 
         if (!this.hasPrevFrame) {
-            // First frame: also copy to prev so delta starts at 0
             this.uploadBitmapToTexture(frame, this.prevFrameTex);
             this.hasPrevFrame = true;
-            return; // Skip rendering on very first frame
+            return;
         }
 
-        // --- Pass 1: EMA update ---
-        // Read from history A (or B), write to the other
-        const readHistTex = this.readFromA ? this.historyTexA : this.historyTexB;
-        const writeFbo = this.readFromA ? this.historyFboB : this.historyFboA;
-        const writeHistTex = this.readFromA ? this.historyTexB : this.historyTexA;
+        const isFirst = this.firstFrame ? 1.0 : 0.0;
 
-        gl.useProgram(this.emaProgram);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, writeFbo);
+        // --- Pass 1: Delta EMA ---
+        const readDeltaTex = this.deltaReadA ? this.deltaTexA : this.deltaTexB;
+        const writeDeltaFbo = this.deltaReadA ? this.deltaFboB : this.deltaFboA;
+        const writeDeltaTex = this.deltaReadA ? this.deltaTexB : this.deltaTexA;
+
+        gl.useProgram(this.deltaEmaProgram);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, writeDeltaFbo);
         gl.viewport(0, 0, this.width, this.height);
 
-        // Bind textures to units
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTex);
-        gl.uniform1i(gl.getUniformLocation(this.emaProgram, 'u_prevFrame'), 0);
+        gl.uniform1i(gl.getUniformLocation(this.deltaEmaProgram, 'u_prevFrame'), 0);
 
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, this.currentFrameTex);
-        gl.uniform1i(gl.getUniformLocation(this.emaProgram, 'u_currentFrame'), 1);
+        gl.uniform1i(gl.getUniformLocation(this.deltaEmaProgram, 'u_currentFrame'), 1);
 
         gl.activeTexture(gl.TEXTURE2);
-        gl.bindTexture(gl.TEXTURE_2D, readHistTex);
-        gl.uniform1i(gl.getUniformLocation(this.emaProgram, 'u_history'), 2);
+        gl.bindTexture(gl.TEXTURE_2D, readDeltaTex);
+        gl.uniform1i(gl.getUniformLocation(this.deltaEmaProgram, 'u_history'), 2);
 
-        gl.uniform1f(gl.getUniformLocation(this.emaProgram, 'u_alpha'), this.alpha);
-        gl.uniform1f(gl.getUniformLocation(this.emaProgram, 'u_firstFrame'), this.firstFrame ? 1.0 : 0.0);
+        gl.uniform1f(gl.getUniformLocation(this.deltaEmaProgram, 'u_alpha'), this.deltaAlpha);
+        gl.uniform1f(gl.getUniformLocation(this.deltaEmaProgram, 'u_firstFrame'), isFirst);
 
-        gl.bindVertexArray(this.quadVAO);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        this.drawQuad();
+        this.deltaReadA = !this.deltaReadA;
 
-        this.readFromA = !this.readFromA;
+        // --- Pass 2: Color EMA ---
+        const readColorTex = this.colorReadA ? this.colorAvgTexA : this.colorAvgTexB;
+        const writeColorFbo = this.colorReadA ? this.colorAvgFboB : this.colorAvgFboA;
+        const writeColorTex = this.colorReadA ? this.colorAvgTexB : this.colorAvgTexA;
+
+        gl.useProgram(this.colorEmaProgram);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, writeColorFbo);
+        gl.viewport(0, 0, this.width, this.height);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.currentFrameTex);
+        gl.uniform1i(gl.getUniformLocation(this.colorEmaProgram, 'u_currentFrame'), 0);
+
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, readColorTex);
+        gl.uniform1i(gl.getUniformLocation(this.colorEmaProgram, 'u_colorAvg'), 1);
+
+        gl.uniform1f(gl.getUniformLocation(this.colorEmaProgram, 'u_colorAlpha'), this.colorAlpha);
+        gl.uniform1f(gl.getUniformLocation(this.colorEmaProgram, 'u_firstFrame'), isFirst);
+
+        this.drawQuad();
+        this.colorReadA = !this.colorReadA;
+
         this.firstFrame = false;
 
-        // --- Pass 2: Threshold + output to screen ---
-        gl.useProgram(this.thresholdProgram);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null); // draw to canvas
+        // --- Pass 3: Output to screen ---
+        gl.useProgram(this.outputProgram);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, this.width, this.height);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, writeHistTex); // the one we just wrote to
-        gl.uniform1i(gl.getUniformLocation(this.thresholdProgram, 'u_history'), 0);
+        gl.bindTexture(gl.TEXTURE_2D, writeDeltaTex);
+        gl.uniform1i(gl.getUniformLocation(this.outputProgram, 'u_deltaHistory'), 0);
 
-        gl.uniform1f(gl.getUniformLocation(this.thresholdProgram, 'u_threshold'), this.threshold);
-        gl.uniform1f(gl.getUniformLocation(this.thresholdProgram, 'u_dimAmount'), this.dimAmount);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, writeColorTex);
+        gl.uniform1i(gl.getUniformLocation(this.outputProgram, 'u_colorAvg'), 1);
 
-        gl.bindVertexArray(this.quadVAO);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.uniform1f(gl.getUniformLocation(this.outputProgram, 'u_threshold'), this.threshold);
+
+        this.drawQuad();
     }
 
     destroy() {
         const gl = this.gl;
-        gl.deleteProgram(this.emaProgram);
-        gl.deleteProgram(this.thresholdProgram);
+        gl.deleteProgram(this.deltaEmaProgram);
+        gl.deleteProgram(this.colorEmaProgram);
+        gl.deleteProgram(this.outputProgram);
         gl.deleteTexture(this.prevFrameTex);
         gl.deleteTexture(this.currentFrameTex);
-        gl.deleteTexture(this.historyTexA);
-        gl.deleteTexture(this.historyTexB);
-        gl.deleteFramebuffer(this.historyFboA);
-        gl.deleteFramebuffer(this.historyFboB);
+        gl.deleteTexture(this.deltaTexA);
+        gl.deleteTexture(this.deltaTexB);
+        gl.deleteTexture(this.colorAvgTexA);
+        gl.deleteTexture(this.colorAvgTexB);
+        gl.deleteFramebuffer(this.deltaFboA);
+        gl.deleteFramebuffer(this.deltaFboB);
+        gl.deleteFramebuffer(this.colorAvgFboA);
+        gl.deleteFramebuffer(this.colorAvgFboB);
     }
 }
