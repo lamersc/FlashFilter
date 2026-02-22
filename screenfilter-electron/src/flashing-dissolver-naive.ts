@@ -63,13 +63,13 @@ export class FlashingDissolverNaive {
                 avg.b += (b1 - avg.b) * 0.05;
             }
 
-            if (this.historical_delta_buffer[i] > 30) {
+            if (this.historical_delta_buffer[i] > 15) {
                 const history = this.pixelFlashHistory[i];
                 history.push(now);
                 // Prune entries older than 1 second
-                while (history.length > 0 && history[0] < now - 1000) history.shift();
-                if (history.length > 10) {
-                    this.pixelBlackUntil[i] = now + 100;
+                while (history.length > 0 && history[0] < now - 5000) history.shift();
+                if (history.length > 3) {
+                    this.pixelBlackUntil[i] = now;
                 }
             }
 
