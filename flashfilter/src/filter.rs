@@ -337,14 +337,14 @@ impl FilterPipeline {
 
         // Upload new frame into the current slot.
         self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
+            wgpu::ImageCopyTexture {
                 texture:   &self.frame_tex[curr],
                 mip_level: 0,
                 origin:    wgpu::Origin3d::ZERO,
                 aspect:    wgpu::TextureAspect::All,
             },
             data,
-            wgpu::TexelCopyBufferLayout {
+            wgpu::ImageDataLayout {
                 offset:         0,
                 bytes_per_row:  Some(4 * self.width),
                 rows_per_image: None,
@@ -356,14 +356,14 @@ impl FilterPipeline {
             // Prime the "previous" slot with the same data so Pass 1 sees
             // a zero delta on bootstrap.
             self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
+                wgpu::ImageCopyTexture {
                     texture:   &self.frame_tex[prev],
                     mip_level: 0,
                     origin:    wgpu::Origin3d::ZERO,
                     aspect:    wgpu::TextureAspect::All,
                 },
                 data,
-                wgpu::TexelCopyBufferLayout {
+                wgpu::ImageDataLayout {
                     offset:         0,
                     bytes_per_row:  Some(4 * self.width),
                     rows_per_image: None,
@@ -449,7 +449,7 @@ impl FilterPipeline {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view:           &self.delta_views[delta_write],
                     resolve_target: None,
-                    ops:            wgpu::Operations { load: wgpu::LoadOp::DontCare, store: wgpu::StoreOp::Store },
+                    ops:            wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes:         None,
@@ -467,7 +467,7 @@ impl FilterPipeline {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view:           &self.color_views[color_write],
                     resolve_target: None,
-                    ops:            wgpu::Operations { load: wgpu::LoadOp::DontCare, store: wgpu::StoreOp::Store },
+                    ops:            wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes:         None,

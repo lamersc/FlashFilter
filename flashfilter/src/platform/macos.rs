@@ -1,13 +1,16 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
 use screencapturekit::{
-    cm_sample_buffer::CMSampleBuffer,
-    cv_pixel_buffer::CVPixelBufferLockFlags,
-    sc_content_filter::{InitParamWithDisplay, SCContentFilter},
-    sc_shareable_content::SCShareableContent,
-    sc_stream::SCStream,
-    sc_stream_configuration::{PixelFormat, SCStreamConfiguration},
-    sc_stream_output::{SCStreamOutput, SCStreamOutputType},
+    cm::CMSampleBuffer,
+    cv::CVPixelBufferLockFlags,
+    shareable_content::SCShareableContent,
+    stream::{
+        configuration::{PixelFormat, SCStreamConfiguration},
+        content_filter::SCContentFilter,
+        output_trait::SCStreamOutputTrait,
+        output_type::SCStreamOutputType,
+        sc_stream::SCStream,
+    },
 };
 use winit::window::Window;
 
@@ -23,13 +26,13 @@ struct CaptureHandler {
     height: u32,
 }
 
-impl SCStreamOutput for CaptureHandler {
+impl SCStreamOutputTrait for CaptureHandler {
     fn did_output_sample_buffer(
         &self,
         sample: CMSampleBuffer,
         _output_type: SCStreamOutputType,
     ) {
-        let Some(pixel_buffer) = sample.get_image_buffer() else { return };
+        let Some(pixel_buffer) = sample.image_buffer() else { return };
         let Ok(guard) = pixel_buffer.lock(CVPixelBufferLockFlags::READ_ONLY) else { return };
 
         let bytes_per_row = guard.bytes_per_row();
@@ -79,23 +82,26 @@ impl ScreenCapture {
             .next()
             .ok_or("no display found")?;
 
-        let width  = display.get_width()  as u32;
-        let height = display.get_height() as u32;
+        let width  = display.width();
+        let height = display.height();
 
         // Capture the entire display; no window exclusions are specified here
         // because our overlay sets NSWindowSharingNone (see setup_window), so
         // it will not appear in the captured frames anyway.
-        let filter = SCContentFilter::new(InitParamWithDisplay { display: &display });
+        let filter = SCContentFilter::create()
+            .with_display(&display)
+            .with_excluding_windows(&[])
+            .build();
 
         let config = SCStreamConfiguration::new()
-            .set_width(width as usize)
-            .set_height(height as usize)
-            .set_pixel_format(PixelFormat::BGRA);
+            .with_width(width)
+            .with_height(height)
+            .with_pixel_format(PixelFormat::BGRA);
 
         let (tx, rx) = sync_channel(1);
         let handler  = CaptureHandler { tx, width, height };
 
-        let mut stream = SCStream::new(&filter, config, None);
+        let mut stream = SCStream::new(&filter, &config);
         stream.add_output_handler(handler, SCStreamOutputType::Screen);
         stream.start_capture()?;
 
@@ -120,10 +126,10 @@ impl FrameCapture for ScreenCapture {
 pub fn setup_window(window: &Window) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
-    use raw_window_handle::HasWindowHandle;
+    use winit::raw_window_handle::HasWindowHandle;
 
     let Ok(handle) = window.window_handle() else { return };
-    let raw_window_handle::RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    let winit::raw_window_handle::RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
 
     unsafe {
         // raw_window_handle 0.6 gives us the NSView pointer.
@@ -138,11 +144,11 @@ pub fn setup_window(window: &Window) {
 
         // Prevent our overlay from appearing in screenshots / recordings.
         // NSWindowSharingNone = 0
-        let _: () = msg_send![ns_window, setSharingType: 0u32];
+        let _: () = msg_send![ns_window, setSharingType: 0u64];
 
         // NSWindowCollectionBehaviorCanJoinAllSpaces (1 << 3) |
         // NSWindowCollectionBehaviorTransient        (1 << 5)
-        let behavior: u32 = (1 << 3) | (1 << 5);
+        let behavior: u64 = (1 << 3) | (1 << 5);
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
     }
 }
