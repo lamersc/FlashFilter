@@ -39,6 +39,6 @@ function startCapture() {
       }).catch((e: Error) => {
         // Frame grab can fail transiently, ignore
       });
-    }, 1);
+    }, 8.3);
   }).catch(e => console.log(e));
 }
