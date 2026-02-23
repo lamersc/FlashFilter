@@ -1,5 +1,7 @@
 # FlashFilter
 
+NOTE: This is a mirror of https://github.com/GenericConfluent/abacus_FlashFilter
+
 Cross Platform Real-time screen flash detection and suppression .
 
 FlashFilter runs as a transparent overlay on top of your screen, continuously analyzing every frame for sudden flashes. When it detects flashing content, it smooths those regions out before they reach your eyes. No configuration, no interaction needed — just run it and forget about it.
